@@ -1,0 +1,17 @@
+{
+  "action": "start",
+  "client_request_id": "auth-migration-01",
+  "workspace_id": "project-1",
+  "task": "Update the authentication API, dependent callers, and tests.",
+  "acceptance_criteria": [
+    "Existing required checks pass",
+    "Update all affected callers"
+  ],
+  "model_profile_id": "coding-default",
+  "validation_profile_id": "project-checks",
+  "mode": "stage",
+  "limits": {
+    "max_parallel": 4,
+    "max_revisions": 3
+  }
+}

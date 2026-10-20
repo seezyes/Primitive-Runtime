@@ -1,0 +1,12 @@
+{
+  "contract_version": "primitive-runtime/0.1",
+  "ok": true,
+  "run": {
+    "run_id": "pr_run_01",
+    "state": "queued",
+    "phase": null,
+    "verification": "not_run",
+    "application": "not_applicable"
+  },
+  "poll_after_ms": 1500
+}

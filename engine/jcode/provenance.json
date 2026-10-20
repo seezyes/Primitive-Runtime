@@ -1,0 +1,9 @@
+{
+  "status": "not_pinned",
+  "upstream_repository": "https://github.com/1jehuang/jcode",
+  "upstream_commit": null,
+  "local_engine_commit": null,
+  "sdk_version": null,
+  "patches": [],
+  "note": "Fill only after verifying and importing an exact upstream commit; do not guess."
+}

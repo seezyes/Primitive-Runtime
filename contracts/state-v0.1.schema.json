@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Primitive Runtime run-state (partial contract)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "state",
+    "phase",
+    "verification",
+    "application",
+    "terminal"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ]
+    },
+    "phase": {
+      "enum": [
+        null,
+        "preflight",
+        "activating",
+        "collaborating",
+        "validating",
+        "diagnosing",
+        "finalizing"
+      ]
+    },
+    "verification": {
+      "enum": [
+        "not_run",
+        "passed",
+        "failed",
+        "unverified"
+      ]
+    },
+    "application": {
+      "enum": [
+        "not_applicable",
+        "staged",
+        "applied",
+        "conflict",
+        "apply_failed"
+      ]
+    },
+    "terminal": {
+      "type": "boolean"
+    }
+  }
+}

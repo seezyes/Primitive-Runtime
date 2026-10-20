@@ -1,0 +1,27 @@
+{
+  "config_version": 1,
+  "endpoints": {
+    "coding-gateway": {
+      "protocol": "openai-chat-completions",
+      "base_url": "http://127.0.0.1:20128/v1",
+      "credential_ref": "secret:primitive-model-key"
+    }
+  },
+  "model_profiles": {
+    "coding-default": {
+      "revision": "profile-rev-1",
+      "activator": {
+        "endpoint_id": "coding-gateway",
+        "model": "planner-route"
+      },
+      "primitive": {
+        "endpoint_id": "coding-gateway",
+        "model": "worker-route"
+      },
+      "diagnosis": {
+        "endpoint_id": "coding-gateway",
+        "model": "diagnosis-route"
+      }
+    }
+  }
+}
