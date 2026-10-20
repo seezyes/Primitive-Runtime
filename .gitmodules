@@ -1,0 +1,3 @@
+[submodule "Primitive-Runtime/engine/jcode/upstream"]
+	path = Primitive-Runtime/engine/jcode/upstream
+	url = https://github.com/1jehuang/jcode.git

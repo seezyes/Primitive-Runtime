@@ -1,9 +1,11 @@
 {
-  "status": "not_pinned",
+  "status": "pinned_upstream_unmodified",
   "upstream_repository": "https://github.com/1jehuang/jcode",
-  "upstream_commit": null,
+  "upstream_commit": "5e7e0457ce2c6f5ecc9903b6f8415d7805594b1e",
+  "source_strategy": "git-submodule",
+  "submodule_path": "Primitive-Runtime/engine/jcode/upstream",
   "local_engine_commit": null,
   "sdk_version": null,
   "patches": [],
-  "note": "Fill only after verifying and importing an exact upstream commit; do not guess."
+  "note": "Submodule contains original JCode. No restricted primitive mode or local patches yet. Clone with git submodule update --init --recursive."
 }

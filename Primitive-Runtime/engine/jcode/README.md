@@ -1,16 +1,20 @@
-# Primitive Runtime JCode engine
+# JCode upstream source
 
-**No upstream code has been vendored yet. No JCode commit has been selected or modified.**
+JCode upstream is pinned as a **Git submodule** at `upstream/` (not vendored inline). The source code is downloaded during submodule initialization, not included directly in this repo's Git objects.
 
-Intended upstream: https://github.com/1jehuang/jcode
+- Repository: https://github.com/1jehuang/jcode
+- Exact upstream commit: `5e7e0457ce2c6f5ecc9903b6f8415d7805594b1e`
+- Upstream license: MIT (preserve upstream `upstream/LICENSE`).
+- Current state: unmodified upstream; restrictive Primitive Runtime engine is **not implemented**.
 
-Before importing a source tree:
+From the outer repository root:
 
-1. Inspect upstream license and redistribution requirements, preserve full license and attribution.
-2. Record *exact* repository URL, upstream commit SHA, local patch series, SDK version and engine version in a tracked manifest.
-3. Import pinned upstream-derived source into this directory (or an explicitly reproducible pinned submodule if the build system allows it).
-4. Implement enforced, headless role-bound `primitive` mode, persistent tool restrictions and file-ownership write checks.
-5. Implement cancellation, generation fencing, usage events and explicit generic model endpoint configuration.
-6. Prove restrictions survive session restoration and reject unrelated user configuration, ambient credentials and recursive spawning.
+```sh
+git clone --recurse-submodules https://github.com/seezyes/Primitive-Runtime.git```
 
-Do not fetch a floating upstream branch at normal runtime or label upstream as a modified fork without actual modifications.
+For existing clones:
+
+```sh
+git submodule update --init --recursive```
+
+Development should implement and test the restricted headless `primitive` role, durable policy restoration, artifact ownership and generation fencing. To patch the upstream engine, fork/pin a separately maintained JCode repository, then update the submodule URL and SHA. No floating branches at startup.
