@@ -1,0 +1,800 @@
+#[test]
+fn test_prompt_jump_ctrl_digit_is_recency_rank_in_app() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+    // Seed max scroll estimates before key handling.
+    render_and_snap(&app, &mut terminal);
+
+    let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
+    app.handle_key(prompt_up_code, prompt_up_mods).unwrap();
+    assert!(app.scroll_offset > 0);
+
+    // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
+    app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.scroll_offset > 0);
+}
+
+#[test]
+fn test_scroll_cmd_j_k_fallback_in_app() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+    // Seed max scroll estimates before key handling.
+    render_and_snap(&app, &mut terminal);
+
+    let (up_code, up_mods) = scroll_up_fallback_key(&app);
+    let (down_code, down_mods) = scroll_down_fallback_key(&app);
+
+    app.handle_key(up_code, up_mods).unwrap();
+    assert!(app.auto_scroll_paused);
+    assert!(app.scroll_offset > 0);
+    let after_up = app.scroll_offset;
+
+    app.handle_key(down_code, down_mods).unwrap();
+    assert!(app.scroll_offset <= after_up);
+}
+
+/// Terminal-style Ctrl+L: after the clear the rendered messages area shows no
+/// transcript body (the spacer fills the viewport; only the sticky
+/// previous-prompt preview band may remain at the top), and scrolling up
+/// brings the old content back, exactly like a terminal's
+/// clear-with-scrollback.
+#[test]
+fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+
+    // Seed viewport geometry (viewport height, max scroll) with a real frame.
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("Intro line"),
+        "sanity: transcript body is visible before Ctrl+L"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    let after = render_and_snap(&app, &mut terminal);
+    assert!(
+        !after.contains("Intro line"),
+        "after Ctrl+L no transcript body is visible:\n{after}"
+    );
+
+    // History is still there: scroll up a page and the content returns.
+    for _ in 0..12 {
+        app.scroll_up(3);
+    }
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("Intro line"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
+    );
+}
+
+#[test]
+fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.push_display_message(DisplayMessage::user("OLD PROMPT MARKER"));
+    app.push_display_message(DisplayMessage::assistant("OLD RESPONSE MARKER"));
+    let backend = ratatui::backend::TestBackend::new(80, 25);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    app.push_display_message(DisplayMessage::user("FRESH PROMPT MARKER"));
+    app.is_processing = true;
+    app.streaming.streaming_text = "FRESH STREAM MARKER".to_string();
+    let streaming = render_and_snap(&app, &mut terminal);
+    assert!(streaming.contains("FRESH STREAM MARKER"), "{streaming}");
+    assert!(!streaming.contains("OLD PROMPT MARKER"), "{streaming}");
+    assert!(!streaming.contains("OLD RESPONSE MARKER"), "{streaming}");
+
+    app.streaming.streaming_text.clear();
+    app.is_processing = false;
+    app.push_display_message(DisplayMessage::assistant("FRESH ANSWER MARKER"));
+    for (width, height) in [(80, 25), (60, 40), (100, 20)] {
+        terminal.backend_mut().resize(width, height);
+        terminal.autoresize().unwrap();
+        let after = render_and_snap(&app, &mut terminal);
+        assert!(!after.contains("OLD PROMPT MARKER"), "{after}");
+        assert!(!after.contains("OLD RESPONSE MARKER"), "{after}");
+        assert!(after.contains("FRESH ANSWER MARKER"), "{after}");
+        let prompt_row = after
+            .lines()
+            .position(|line| line.contains("FRESH PROMPT MARKER"));
+        assert!(
+            prompt_row.is_some_and(|row| row <= 2),
+            "fresh prompt stays at top: {after}"
+        );
+    }
+
+    app.scroll_up(usize::MAX);
+    let history = render_and_snap(&app, &mut terminal);
+    assert!(history.contains("OLD PROMPT MARKER"), "{history}");
+    app.follow_chat_bottom();
+    let restored = render_and_snap(&app, &mut terminal);
+    assert!(!restored.contains("OLD PROMPT MARKER"), "{restored}");
+    assert!(restored.contains("FRESH ANSWER MARKER"), "{restored}");
+}
+
+#[test]
+fn test_empty_prompt_up_down_browses_previous_prompts() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("first prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second prompt"),
+    ];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "second prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "first prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "first prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "second prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert_eq!(app.cursor_pos, 0);
+}
+
+#[test]
+fn test_ctrl_l_fresh_prompt_remains_visible_with_pinned_todos() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": [
+            pinned_band_todo("active", "Current task", "in_progress")
+        ]})
+        .to_string(),
+    );
+    app.push_display_message(DisplayMessage::assistant("OLD RESPONSE MARKER"));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.push_display_message(DisplayMessage::user("FRESH PROMPT MARKER"));
+    let after = render_and_snap(&app, &mut terminal);
+    assert!(after.contains("Current task"), "{after}");
+    assert!(after.contains("FRESH PROMPT MARKER"), "{after}");
+    assert!(!after.contains("OLD RESPONSE MARKER"), "{after}");
+}
+
+#[test]
+fn test_ctrl_up_browses_history_when_no_pending_message() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("first prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second prompt"),
+    ];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "second prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "first prompt");
+}
+
+#[test]
+fn test_prompt_history_up_does_not_replace_unmatched_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.input = "draft".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, "draft".len());
+}
+
+#[test]
+fn test_multiline_prompt_up_down_moves_cursor_within_input() {
+    let mut app = create_test_app();
+    app.input = "abc\ndefg\nxy".to_string();
+    app.cursor_pos = "abc\nde".len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.cursor_pos, "ab".len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.cursor_pos, "abc\nde".len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.cursor_pos, app.input.len());
+}
+
+#[test]
+fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("line one\nline two"),
+    ];
+    app.input = "line one\nline two".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "line one\nline two");
+    assert_eq!(app.cursor_pos, "line one".len());
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "older prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+}
+
+#[test]
+fn test_ctrl_up_down_always_browses_prompt_history() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("line one\nline two"),
+    ];
+    app.input = "line one\nline two".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "older prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "line one\nline two");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.input = "draft line one\ndraft line two".to_string();
+    app.cursor_pos = "draft line".len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "older prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "draft line one\ndraft line two");
+    assert_eq!(app.cursor_pos, "draft line".len());
+
+    // The draft is handed back once; walking off the end again clears.
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.input = "newer prompt".to_string();
+    app.history_draft = None;
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_ctrl_up_from_draft_can_be_undone() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.input = "draft".to_string();
+    app.cursor_pos = 2;
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "previous prompt");
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, 2);
+}
+
+#[test]
+fn test_undo_after_ctrl_up_drops_stale_history_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.input = "v1".to_string();
+    app.cursor_pos = app.input.len();
+
+    // Ctrl+Up stashes the draft; Ctrl+Z brings it back.
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "v1");
+
+    // The user keeps editing, then accepts a match through Ctrl+R.
+    app.input = "v2".to_string();
+    app.cursor_pos = app.input.len();
+    app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .unwrap();
+    for c in "newer".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    // The stale draft from before the edit must not come back.
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_ne!(app.input, "v1");
+}
+
+#[test]
+fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.display_messages = vec![
+        DisplayMessage::user("first remote prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second remote prompt"),
+    ];
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "second remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "first remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "second remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_remote_ctrl_up_retrieves_pending_queue_before_prompt_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.display_messages = vec![DisplayMessage::user("previous remote prompt")];
+    app.queued_messages.push("queued followup".to_string());
+    app.pending_queued_dispatch = true;
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input, "queued followup");
+    assert!(app.queued_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
+}
+
+#[test]
+fn test_remote_prompt_jump_ctrl_brackets() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // Seed max scroll estimates before key handling.
+    render_and_snap(&app, &mut terminal);
+
+    assert_eq!(app.scroll_offset, 0);
+    assert!(!app.auto_scroll_paused);
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('['), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.auto_scroll_paused);
+    assert!(app.scroll_offset > 0);
+
+    let after_up = app.scroll_offset;
+    rt.block_on(app.handle_remote_key(KeyCode::Char(']'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.scroll_offset <= after_up);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_remote_prompt_jump_ctrl_esc_fallback_on_macos() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // Seed max scroll estimates before key handling.
+    render_and_snap(&app, &mut terminal);
+
+    assert_eq!(app.scroll_offset, 0);
+    rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.auto_scroll_paused);
+    assert!(app.scroll_offset > 0);
+}
+
+#[test]
+fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+    app.queued_messages
+        .push(super::commands::build_poke_message(&[
+            crate::todo::TodoItem {
+                group: None,
+                id: "todo-1".to_string(),
+                content: "keep going".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+                confidence_history: Vec::new(),
+            },
+        ]));
+
+    rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(app.queued_messages.is_empty());
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... Auto-poke OFF".to_string())
+    );
+}
+
+#[test]
+fn test_remote_ctrl_digit_side_panel_preset() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('4'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert_eq!(app.diagram_pane_ratio_target, 100);
+}
+
+#[test]
+fn test_remote_prompt_jump_ctrl_digit_is_recency_rank() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // Seed max scroll estimates before key handling.
+    render_and_snap(&app, &mut terminal);
+
+    let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
+    rt.block_on(app.handle_remote_key(prompt_up_code, prompt_up_mods, &mut remote))
+        .unwrap();
+    assert!(app.scroll_offset > 0);
+
+    // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
+    rt.block_on(app.handle_remote_key(KeyCode::Char('5'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.scroll_offset > 0);
+}
+
+#[test]
+fn test_remote_ctrl_c_interrupts_while_processing() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert!(app.quit_pending.is_none());
+    assert!(app.is_processing);
+}
+
+#[test]
+fn test_remote_ctrl_c_still_arms_quit_when_idle() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert!(app.quit_pending.is_some());
+    assert_eq!(
+        app.status_notice(),
+        Some("Press Ctrl+C again to quit".to_string())
+    );
+}
+
+#[test]
+fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
+    let _render_lock = scroll_render_test_lock();
+    // Route the copy into the in-process sink so this passes on a headless
+    // runner instead of hitting the real OS clipboard.
+    let clipboard = CapturedClipboard::new();
+    let (mut app, mut terminal) = create_copy_test_app();
+
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
+        .unwrap();
+
+    let copied = clipboard
+        .text()
+        .expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(
+        notice == "Copied rust",
+        "expected copy notice, got: {}",
+        notice
+    );
+
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("Copied!"),
+        "expected inline copied feedback: {}",
+        text
+    );
+}
+
+#[test]
+fn test_remote_copy_badge_shortcut_supported() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let (mut app, mut terminal) = create_copy_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    render_and_snap(&app, &mut terminal);
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('S'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+
+    let copied = clipboard
+        .text()
+        .expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(
+        notice == "Copied rust",
+        "expected copy notice, got: {}",
+        notice
+    );
+
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("Copied!"),
+        "expected inline copied feedback: {}",
+        text
+    );
+}
+
+/// Ctrl+L collapses the (entirely blank) messages viewport so the numbered
+/// prompt indicator lands at the *top* of the screen, exactly like a terminal
+/// after `clear`, instead of floating at the bottom under a screenful of
+/// blanks. Scrolling up drops the spacer and immediately brings the transcript
+/// back with the normal bottom-anchored layout.
+#[test]
+fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    let mut messages = Vec::new();
+    for prompt in 0..4 {
+        messages.push(DisplayMessage::user(format!("prompt number {prompt}")));
+        messages.push(DisplayMessage::assistant(
+            (0..15)
+                .map(|line| format!("resp {prompt} line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+    }
+    app.display_messages = messages;
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+
+    let backend = ratatui::backend::TestBackend::new(80, 25);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("resp 3 line 14"),
+        "sanity: transcript is visible before Ctrl+L:\n{before}"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(
+        app.terminal_clear_collapsed(),
+        "Ctrl+L enters the collapsed terminal-clear state"
+    );
+
+    let after = render_and_snap(&app, &mut terminal);
+    let rows: Vec<&str> = after.lines().collect();
+    let prompt_row = rows
+        .iter()
+        .position(|row| row.trim_end().ends_with('>'))
+        .unwrap_or_else(|| panic!("no prompt indicator row found:\n{after}"));
+    assert!(
+        prompt_row <= 2,
+        "prompt indicator should sit at the top after Ctrl+L, found on row \
+         {prompt_row}:\n{after}"
+    );
+    assert!(
+        !after.contains("resp 3 line 14"),
+        "the transcript is cleared from the screen:\n{after}"
+    );
+
+    // Scrolling up leaves the collapsed state and brings history straight back
+    // without first travelling through a viewport of blank spacer rows.
+    app.scroll_up(5);
+    assert!(
+        !app.terminal_clear_collapsed(),
+        "scrolling up exits the collapsed state"
+    );
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("prompt number 0"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
+    );
+}
+
+/// New behavior: typing a second prompt while a turn runs and then pressing
+/// Esc stops only the current turn and runs the new prompt next. Previously
+/// local Esc threw the second prompt away and turned auto-poke off.
+#[test]
+fn test_local_escape_with_pending_prompt_redirects_to_it() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+    app.interleave_message = Some("do this instead".to_string());
+    app.interleave_images = vec![("image/png".to_string(), "aGk=".to_string())];
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    assert!(app.cancel_requested, "the current turn must stop");
+    assert!(
+        app.auto_poke_incomplete_todos,
+        "a redirect keeps auto-poke on"
+    );
+    assert_eq!(app.queued_messages(), &["do this instead"]);
+    assert!(app.interleave_message.is_none());
+    assert_eq!(app.pending_images.len(), 1, "staged images are not dropped");
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... sending your next prompt".to_string())
+    );
+
+    // The turn loop's cancel path then schedules queued dispatch.
+    app.schedule_queued_dispatch_after_interrupt();
+    assert!(app.pending_queued_dispatch);
+}
+
+/// Esc with nothing pending still means "stop everything".
+#[test]
+fn test_local_escape_without_pending_prompt_still_stops_everything() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    assert!(app.cancel_requested);
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(app.queued_messages().is_empty());
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... Auto-poke OFF".to_string())
+    );
+}
+
+/// Remote: replays the event order seen in a real session. Second prompt is
+/// sent as a soft interrupt, Esc cancels, the server sends Done and only then
+/// Interrupted. The prompt must survive and be dispatched as the next turn,
+/// only after Interrupted (so the late Interrupted cannot end the new turn).
+#[test]
+fn test_remote_escape_with_pending_prompt_runs_it_after_interrupt() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.auto_poke_incomplete_todos = true;
+    app.pending_soft_interrupts = vec!["do this instead".to_string()];
+
+    rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert!(
+        app.auto_poke_incomplete_todos,
+        "a redirect keeps auto-poke on"
+    );
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... sending your next prompt".to_string())
+    );
+
+    // Done arrives first. Nothing may be sent yet.
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert!(!app.is_processing, "held until Interrupted");
+    assert_eq!(app.pending_soft_interrupts, vec!["do this instead"]);
+
+    // Interrupted arrives: the prompt is recovered and sent as the next turn.
+    app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+    assert!(app.pending_queued_dispatch);
+    app.pending_queued_dispatch = false;
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    if !app.is_processing {
+        app.pending_queued_dispatch = false;
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    }
+
+    assert!(app.is_processing, "the new prompt is now the running turn");
+    assert!(app.pending_soft_interrupts.is_empty());
+    assert!(app.queued_messages().is_empty());
+    let users: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(users, vec!["do this instead"]);
+}
