@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-base="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+base="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 upstream="$base/upstream"
 modified="$base/modified"
 output="$base/patches/jcode-modifications.patch"
