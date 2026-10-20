@@ -3,16 +3,18 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": [
-      "ES2022"
-    ],
+    "lib": ["ES2022", "DOM"],
     "strict": true,
     "rootDir": "packages",
     "outDir": "dist",
     "skipLibCheck": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "declaration": true,
+    "sourceMap": true,
+    "types": ["node"],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
-  "include": [
-    "packages/**/*.ts"
-  ]
+  "include": ["packages/**/*.ts"]
 }

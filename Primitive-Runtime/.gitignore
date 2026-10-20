@@ -6,3 +6,9 @@ coverage/
 *.tsbuildinfo
 .runtime/
 .DS_Store
+release/
+bin/
+licenses/
+npm-shrinkwrap.json
+*.log
+build-info.json

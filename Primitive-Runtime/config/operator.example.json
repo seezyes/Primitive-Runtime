@@ -1,27 +1,105 @@
 {
   "config_version": 1,
+  "revision": "example-config-1",
+  "state_dir": "/absolute/private/primitive-state",
+  "socket_path": "/absolute/private/primitive-state/runtime.sock",
+  "operator_token_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "engine": {
+    "binary": "/absolute/primitive-runtime/bin/linux-x64/jcode-primitive",
+    "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "retention_days": 7,
+  "limits": {
+    "max_parallel": 4,
+    "max_revisions": 3,
+    "max_wall_time_seconds": 900,
+    "max_input_tokens": 200000,
+    "max_output_tokens": 40000,
+    "max_primitives": 16,
+    "max_messages": 150,
+    "max_file_bytes": 262144,
+    "max_workspace_bytes": 67108864,
+    "max_files": 10000,
+    "max_artifact_bytes": 4194304,
+    "max_tool_calls": 128,
+    "max_model_calls": 256,
+    "max_provider_retries": 2,
+    "max_schema_corrections": 2
+  },
+  "workspaces": {
+    "my-project": {
+      "revision": "example-workspace-1",
+      "path": "/absolute/workspaces/my-project",
+      "default_model_profile_id": "coding-default",
+      "default_validation_profile_id": "linux-acceptance"
+    }
+  },
   "endpoints": {
     "coding-gateway": {
+      "revision": "example-endpoint-1",
       "protocol": "openai-chat-completions",
-      "base_url": "http://127.0.0.1:20128/v1",
-      "credential_ref": "secret:primitive-model-key"
+      "base_url": "https://models.example.invalid/v1",
+      "credential_ref": "env:PRIMITIVE_MODEL_API_KEY"
     }
   },
   "model_profiles": {
     "coding-default": {
-      "revision": "profile-rev-1",
+      "revision": "example-model-profile-1",
       "activator": {
         "endpoint_id": "coding-gateway",
-        "model": "planner-route"
+        "model": "replace-with-activator-model"
       },
       "primitive": {
         "endpoint_id": "coding-gateway",
-        "model": "worker-route"
+        "model": "replace-with-primitive-model"
       },
       "diagnosis": {
         "endpoint_id": "coding-gateway",
-        "model": "diagnosis-route"
+        "model": "replace-with-diagnosis-model"
       }
+    }
+  },
+  "validation_profiles": {
+    "linux-acceptance": {
+      "revision": "example-validation-profile-1",
+      "backend": "bwrap",
+      "network": "none",
+      "checks": [
+        {
+          "id": "acceptance",
+          "command": "/usr/bin/python3",
+          "args": ["-I", "tests/acceptance.py"],
+          "required": true,
+          "timeout_seconds": 60
+        }
+      ],
+      "limits": {
+        "memory_mb": 512,
+        "cpu_seconds": 60,
+        "pids": 32,
+        "max_output_bytes": 65536,
+        "max_disk_mb": 128
+      }
+    }
+  },
+  "clients": {
+    "example-client-reprovision-required": {
+      "revision": "example-client-1",
+      "token_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "principal": "example-user",
+      "tool_binding": "coding",
+      "workspace_ids": ["my-project"],
+      "model_profile_ids": ["coding-default"],
+      "validation_profile_ids": ["linux-acceptance"],
+      "actions": [
+        "capabilities",
+        "start",
+        "status",
+        "result",
+        "artifact",
+        "cancel"
+      ],
+      "revoked": true
     }
   }
 }

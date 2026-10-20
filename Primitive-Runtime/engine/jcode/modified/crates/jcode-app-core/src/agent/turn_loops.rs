@@ -69,6 +69,10 @@ impl Agent {
             self.graceful_shutdown.clone(),
         );
         let mut final_text = String::new();
+        // Shared with restricted headless sessions. The ordinary adapter
+        // supplies memory/compaction/provider/registry/persistence; this core
+        // owns request, assistant and ordered result transitions.
+        let mut turn_core = jcode_turn_core::TurnMachine::new(jcode_turn_core::Options::ordinary());
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
@@ -84,10 +88,12 @@ impl Agent {
             // observed; the loop is re-entered by several recovery paths
             // (issue #732, regression of #428).
             if self.is_graceful_shutdown() {
+                turn_core.cancel();
                 logging::info("Cancel observed at turn-loop head - not starting another request");
                 break;
             }
             if let Some(block) = self.session.migration_lease_block() {
+                turn_core.cancel();
                 logging::info(&format!(
                     "Session migrated mid-turn - stopping local turn loop: {block}"
                 ));
@@ -203,6 +209,14 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
+            // A transport/stream recovery path may retry without accepting an
+            // assistant response. Explicitly end that failed attempt first.
+            if turn_core.phase() == jcode_turn_core::Phase::AwaitingResponse {
+                turn_core.abandon_request(turn_core.request_count())?;
+            }
+            turn_core.replace_request_context(send_messages.to_vec())?;
+            let core_request_id = turn_core.request()?;
+            let send_messages = turn_core.messages();
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
             let completion = self
@@ -219,6 +233,7 @@ impl Agent {
             let mut stream = match completion {
                 Ok(stream) => stream,
                 Err(e) => {
+                    turn_core.abandon_request(core_request_id)?;
                     self.record_failed_account_route(&e.to_string());
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
@@ -938,9 +953,13 @@ impl Agent {
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
-            for tc in &tool_calls {
-                content_blocks.push(tc.to_tool_use_block());
-            }
+            let core_assistant = turn_core.accept_response(
+                core_request_id,
+                content_blocks,
+                tool_calls.clone(),
+                stop_reason.clone(),
+            )?;
+            let content_blocks = core_assistant.content;
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
@@ -977,6 +996,7 @@ impl Agent {
                 &mut tool_calls,
                 assistant_message_id.as_ref(),
             );
+            turn_core.retain_local_calls(&tool_calls)?;
 
             if tool_calls.is_empty() && !generated_image_contexts.is_empty() {
                 for blocks in generated_image_contexts.drain(..) {
@@ -990,7 +1010,7 @@ impl Agent {
             }
 
             // If no tool calls, we're done
-            if tool_calls.is_empty() {
+            if !turn_core.has_pending() {
                 // Unparseable tool-call markup in the text (issue #1702):
                 // surface it and ask the model to re-issue the call natively.
                 if let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
@@ -1058,6 +1078,7 @@ impl Agent {
             // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                turn_core.retain_local_calls(&tool_calls)?;
                 if tool_calls.is_empty() {
                     if !generated_image_contexts.is_empty() {
                         for blocks in generated_image_contexts.drain(..) {
@@ -1089,7 +1110,7 @@ impl Agent {
             let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
-            for tc in tool_calls {
+            while let Some(tc) = turn_core.pending().cloned() {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
@@ -1112,14 +1133,13 @@ impl Agent {
                     if print_output {
                         println!("\n  → {}", error_msg);
                     }
-                    self.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
-                            content: error_msg,
-                            is_error: Some(true),
-                        }],
-                    );
+                    let blocks = vec![ContentBlock::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: error_msg,
+                        is_error: Some(true),
+                    }];
+                    let result = turn_core.complete_tool(&tc.id, blocks)?;
+                    self.add_message(result.role, result.content);
                     tool_results_dirty = true;
                     continue;
                 }
@@ -1174,14 +1194,13 @@ impl Agent {
                             title: None,
                         }));
 
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: sdk_content,
-                                is_error: if sdk_is_error { Some(true) } else { None },
-                            }],
-                        );
+                        let blocks = vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: sdk_content,
+                            is_error: if sdk_is_error { Some(true) } else { None },
+                        }];
+                        let result = turn_core.complete_tool(&tc.id, blocks)?;
+                        self.add_message(result.role, result.content);
                         tool_results_dirty = true;
                         continue;
                     }
@@ -1264,10 +1283,11 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        let blocks = tool_output_to_content_blocks(tc.id, output);
+                        let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                        let result = turn_core.complete_tool(&tc.id, blocks)?;
                         self.add_message_with_duration(
-                            Role::User,
-                            blocks,
+                            result.role,
+                            result.content,
                             Some(tool_elapsed.as_millis() as u64),
                         );
                         tool_results_dirty = true;
@@ -1294,13 +1314,15 @@ impl Agent {
                         if print_output {
                             println!("{}", error_msg);
                         }
+                        let blocks = vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: error_msg,
+                            is_error: Some(true),
+                        }];
+                        let result = turn_core.complete_tool(&tc.id, blocks)?;
                         self.add_message_with_duration(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: error_msg,
-                                is_error: Some(true),
-                            }],
+                            result.role,
+                            result.content,
                             Some(tool_elapsed.as_millis() as u64),
                         );
                         tool_results_dirty = true;

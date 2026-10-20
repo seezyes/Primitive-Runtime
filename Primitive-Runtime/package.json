@@ -1,18 +1,47 @@
 {
   "name": "primitive-runtime",
-  "private": true,
-  "version": "0.0.0",
-  "description": "Specification-first scaffold for a standalone Primitive Runtime MCP service",
+  "version": "0.1.0",
+  "description": "Standalone MCP runtime for artifact-owned coding agents with a restricted JCode engine",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24.0.0 <25"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/*.test.mjs",
-    "build": "tsc"
+    "test": "npm run build && node scripts/test.mjs",
+    "build": "tsc",
+    "start": "node dist/runtime/src/cli.js",
+    "test:acceptance": "npm run build && node tests/acceptance.test.mjs",
+    "package:release": "node scripts/package-release.mjs",
+    "format": "prettier --write packages/runtime/src packages/operator-tui/src tests scripts config contracts README.md docs/ARCHITECTURE.md docs/SECURITY.md docs/CONTRIBUTING.md docs/OPERATOR_PANEL.md docs/EVALUATION.md docs/REVIEW.md",
+    "format:check": "prettier --check packages/runtime/src packages/operator-tui/src tests scripts config contracts README.md docs/ARCHITECTURE.md docs/SECURITY.md docs/CONTRIBUTING.md docs/OPERATOR_PANEL.md docs/EVALUATION.md docs/REVIEW.md"
+  },
+  "bin": {
+    "primitive-runtime": "dist/runtime/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "packages/operator-tui",
+    "contracts",
+    "prompts",
+    "docs",
+    "config",
+    "scripts",
+    "bin",
+    "build-info.json",
+    "licenses",
+    "npm-shrinkwrap.json",
+    "engine/JCODE_PROVENANCE.json"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ajv": "8.17.1",
+    "zod": "3.25.76"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
-  }
+    "@types/node": "24.10.1",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  },
+  "license": "Apache-2.0"
 }

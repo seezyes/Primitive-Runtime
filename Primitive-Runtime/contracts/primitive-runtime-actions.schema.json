@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/seezyes/Primitive-Runtime/blob/main/contracts/primitive-runtime-actions.schema.json",
+  "$id": "https://github.com/seezyes/Primitive-Runtime/blob/main/Primitive-Runtime/contracts/primitive-runtime-actions.schema.json",
   "title": "Primitive Runtime MCP tool input v0.1",
   "oneOf": [
     {
@@ -60,9 +60,7 @@
     "capabilities": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action"
-      ],
+      "required": ["action"],
       "properties": {
         "action": {
           "const": "capabilities"
@@ -72,12 +70,7 @@
     "start": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action",
-        "client_request_id",
-        "workspace_id",
-        "task"
-      ],
+      "required": ["action", "client_request_id", "workspace_id", "task"],
       "properties": {
         "action": {
           "const": "start"
@@ -119,10 +112,7 @@
     "status": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action",
-        "run_id"
-      ],
+      "required": ["action", "run_id"],
       "properties": {
         "action": {
           "const": "status"
@@ -143,10 +133,7 @@
     "result": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action",
-        "run_id"
-      ],
+      "required": ["action", "run_id"],
       "properties": {
         "action": {
           "const": "result"
@@ -159,11 +146,7 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action",
-        "run_id",
-        "artifact_id"
-      ],
+      "required": ["action", "run_id", "artifact_id"],
       "properties": {
         "action": {
           "const": "artifact"
@@ -188,10 +171,7 @@
     "cancel": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "action",
-        "run_id"
-      ],
+      "required": ["action", "run_id"],
       "properties": {
         "action": {
           "const": "cancel"
