@@ -1,0 +1,8 @@
+{
+  "upstream_repository": "https://github.com/1jehuang/jcode",
+  "upstream_release": "v0.99.0",
+  "upstream_commit": "774613c90751b6a26ae9eb6a27be6aff3f210062",
+  "import_method": "verified release-tag source tree, vendored files",
+  "modifications": [],
+  "status": "upstream_source_with_four_redacted_oauth_literals"
+}

@@ -1,0 +1,870 @@
+use image::GenericImageView;
+use ratatui::prelude::{Line, Modifier, Span, Style};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::fs::File;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
+use std::time::Duration;
+use wait_timeout::ChildExt;
+
+// Bump whenever rendering output changes so stale images are not reused.
+const RENDERER_VERSION: u8 = 6;
+const MAX_SOURCE_BYTES: usize = 32 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const FOREGROUND: (u8, u8, u8) = super::MATH_FOREGROUND;
+const FALLBACK_RENDER_DPI: u16 = 240;
+const MIN_RENDER_DPI: u16 = 240;
+const MAX_RENDER_DPI: u16 = 480;
+const DPI_PER_CELL_PIXEL: u16 = 9;
+const DPI_QUANTUM: u16 = 12;
+
+static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
+static REPORTED_ERRORS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LatexCopySource {
+    pub source: String,
+    pub display: bool,
+}
+
+#[derive(Default)]
+struct CopySourceCache {
+    entries: HashMap<u64, LatexCopySource>,
+    order: VecDeque<u64>,
+}
+
+static COPY_SOURCES: LazyLock<Mutex<CopySourceCache>> =
+    LazyLock::new(|| Mutex::new(CopySourceCache::default()));
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandtermNativeLatex {
+    pub source: String,
+    pub display: bool,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Default)]
+struct HandtermNativeLatexCache {
+    entries: HashMap<u64, HandtermNativeLatex>,
+    order: VecDeque<u64>,
+}
+
+static HANDTERM_NATIVE_LATEX: LazyLock<Mutex<HandtermNativeLatexCache>> =
+    LazyLock::new(|| Mutex::new(HandtermNativeLatexCache::default()));
+
+/// Negative cache for LaTeX snippets whose render already failed.
+///
+/// `render_latex_image` runs synchronously on the draw path, so without this a
+/// snippet that fails (or times out after `COMMAND_TIMEOUT`) respawns
+/// latex/pdflatex on every redraw, chaining hundreds of processes and freezing
+/// the TUI for minutes (see #563).
+const FAILED_RENDER_CACHE_LIMIT: usize = 4096;
+
+#[derive(Default)]
+struct FailedRenderCache {
+    entries: HashMap<u64, String>,
+    order: VecDeque<u64>,
+}
+
+static FAILED_RENDERS: LazyLock<Mutex<FailedRenderCache>> =
+    LazyLock::new(|| Mutex::new(FailedRenderCache::default()));
+
+/// Outcome of a LaTeX image render request issued from the draw path.
+pub(super) enum LatexImageOutcome {
+    /// Rendered lines are ready (the artifact was already cached on disk).
+    Ready(Vec<Line<'static>>),
+    /// A background render was queued; the caller should emit a placeholder
+    /// and re-render once the deferred render epoch advances.
+    Pending,
+    /// Rendering is impossible or already known to fail for this snippet.
+    Failed(String),
+}
+
+/// LaTeX snippets whose background render is currently queued or running,
+/// keyed by `cache_key`. Prevents re-queueing the same formula on every frame.
+static PENDING_RENDERS: LazyLock<Mutex<HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct DeferredLatexTask {
+    source: String,
+    display: bool,
+    dpi: u16,
+    key: u64,
+}
+
+static DEFERRED_TX: OnceLock<mpsc::Sender<DeferredLatexTask>> = OnceLock::new();
+
+fn deferred_sender() -> &'static mpsc::Sender<DeferredLatexTask> {
+    DEFERRED_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<DeferredLatexTask>();
+        // A failure to spawn leaves the receiver dropped, so `send` fails and
+        // callers fall back to reporting the error rather than blocking.
+        let _ = std::thread::Builder::new()
+            .name("jcode-latex-deferred".to_string())
+            .spawn(move || deferred_worker(rx));
+        tx
+    })
+}
+
+fn deferred_worker(rx: mpsc::Receiver<DeferredLatexTask>) {
+    for task in rx {
+        let toolchain = Toolchain::from_environment();
+        if let Err(error) = render_artifact(&task.source, task.display, task.dpi, &toolchain) {
+            remember_render_failure(task.key, &error);
+            report_error(&error);
+        }
+        if let Ok(mut pending) = PENDING_RENDERS.lock() {
+            pending.remove(&task.key);
+        }
+        // Reuse the deferred-render epoch so every markdown/body cache layer
+        // that already invalidates on completed mermaid renders also picks up
+        // completed formulas.
+        super::mermaid::notify_deferred_render_completed();
+    }
+}
+
+/// Queue a background render for `key`, returning false when the toolchain
+/// worker is unavailable.
+fn enqueue_render(source: &str, display: bool, dpi: u16, key: u64) -> bool {
+    match PENDING_RENDERS.lock() {
+        Ok(mut pending) => {
+            if !pending.insert(key) {
+                return true;
+            }
+        }
+        Err(_) => return false,
+    }
+    let task = DeferredLatexTask {
+        source: source.to_string(),
+        display,
+        dpi,
+        key,
+    };
+    if deferred_sender().send(task).is_err() {
+        if let Ok(mut pending) = PENDING_RENDERS.lock() {
+            pending.remove(&key);
+        }
+        return false;
+    }
+    true
+}
+
+/// Lock the failure cache, recovering from poisoning.
+///
+/// A panic while holding this lock leaves only cache bookkeeping inconsistent,
+/// never user data, so recovering the guard is strictly better than silently
+/// disabling the cache (which would restore the #563 respawn loop).
+fn failed_renders() -> std::sync::MutexGuard<'static, FailedRenderCache> {
+    FAILED_RENDERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cached_render_failure(key: u64) -> Option<String> {
+    failed_renders().entries.get(&key).cloned()
+}
+
+fn remember_render_failure(key: u64, error: &str) {
+    let mut cache = failed_renders();
+    if cache.entries.insert(key, error.to_string()).is_none() {
+        cache.order.push_back(key);
+    }
+    while cache.order.len() > FAILED_RENDER_CACHE_LIMIT {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Test hook: forget remembered failures so a retry actually re-renders.
+#[cfg(test)]
+pub(super) fn reset_failed_render_cache() {
+    let mut cache = failed_renders();
+    cache.entries.clear();
+    cache.order.clear();
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HANDTERM_NATIVE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RENDER_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count of blocking TeX toolchain invocations. The draw path must never
+/// increment this (see #735): only the deferred worker thread may.
+#[cfg(test)]
+pub(super) static TEST_TOOLCHAIN_RUNS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_test_render_attempts() {
+    TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn test_render_attempts() -> u64 {
+    TEST_RENDER_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn test_toolchain_runs() -> u64 {
+    TEST_TOOLCHAIN_RUNS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_log_hook(hook: fn(&str)) {
+    if let Ok(mut current) = LOG_HOOK.lock() {
+        *current = hook;
+    }
+}
+
+pub(crate) fn report_error(error: &str) {
+    if should_report_error(error)
+        && let Ok(hook) = LOG_HOOK.lock()
+    {
+        hook(error);
+    }
+}
+
+fn should_report_error(error: &str) -> bool {
+    REPORTED_ERRORS
+        .lock()
+        .map(|mut reported| reported.insert(error.to_string()))
+        .unwrap_or(false)
+}
+
+pub fn error_is_missing_toolchain(error: &str) -> bool {
+    error == TOOLCHAIN_MISSING_ERROR
+        || (error.contains("start latex:")
+            && (error.contains("No such file or directory") || error.contains("program not found")))
+}
+
+fn handterm_terminal_name(term_program: Option<&str>) -> bool {
+    term_program.is_some_and(|value| value.eq_ignore_ascii_case("handterm"))
+}
+
+fn handterm_native_latex_available() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TEST_HANDTERM_NATIVE_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+
+    handterm_terminal_name(std::env::var("TERM_PROGRAM").ok().as_deref())
+}
+
+#[cfg(test)]
+pub(super) fn with_handterm_native_latex_override<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    TEST_HANDTERM_NATIVE_OVERRIDE.with(|override_value| {
+        let previous = override_value.replace(Some(enabled));
+        struct ResetOverride<'a> {
+            value: &'a std::cell::Cell<Option<bool>>,
+            previous: Option<bool>,
+        }
+
+        impl Drop for ResetOverride<'_> {
+            fn drop(&mut self) {
+                self.value.set(self.previous);
+            }
+        }
+
+        let _reset = ResetOverride {
+            value: override_value,
+            previous,
+        };
+        f()
+    })
+}
+
+pub fn encode_handterm_latex_apc(source: &str) -> Option<String> {
+    if source.bytes().any(|byte| matches!(byte, 0x07 | 0x1b)) {
+        return None;
+    }
+    Some(format!("\x1b_L;{source}\x1b\\"))
+}
+
+pub fn handterm_native_latex_for_hash(hash: u64) -> Option<HandtermNativeLatex> {
+    HANDTERM_NATIVE_LATEX
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&hash).cloned())
+}
+
+pub(super) fn render_handterm_native_latex(
+    source: &str,
+    display: bool,
+    max_width: Option<usize>,
+) -> Option<Vec<Line<'static>>> {
+    if !handterm_native_latex_available() || validate_source(source).is_err() {
+        return None;
+    }
+    encode_handterm_latex_apc(source)?;
+
+    // Use the same library and version as Handterm so the placeholder geometry
+    // exactly matches the native APC result. Unsupported expressions retain the
+    // existing image/Unicode fallback instead of risking a mismatched region.
+    let rendered = mdwright_latex::render_unicode_math(source).ok()?;
+    let rows = rendered.lines().len().max(1);
+    let cols = rendered.width().max(1);
+    let width_limit = max_width
+        .unwrap_or(u16::MAX as usize)
+        .min(u16::MAX as usize);
+    if rows > u16::MAX as usize || cols > width_limit {
+        return None;
+    }
+    let rows = rows as u16;
+    let cols = cols as u16;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "handterm-native-latex-v1".hash(&mut hasher);
+    source.hash(&mut hasher);
+    display.hash(&mut hasher);
+    rows.hash(&mut hasher);
+    cols.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    register_copy_source(hash, source, display);
+    if let Ok(mut cache) = HANDTERM_NATIVE_LATEX.lock() {
+        if cache.entries.contains_key(&hash) {
+            cache.order.retain(|entry| *entry != hash);
+        }
+        cache.entries.insert(
+            hash,
+            HandtermNativeLatex {
+                source: source.to_string(),
+                display,
+                rows,
+                cols,
+            },
+        );
+        cache.order.push_back(hash);
+        while cache.order.len() > COPY_SOURCE_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
+        }
+    }
+
+    let mut lines = vec![Line::from(Span::styled(
+        "  math",
+        Style::default().add_modifier(Modifier::DIM),
+    ))];
+    lines.extend(super::mermaid::inline_image_placeholder_lines(
+        hash, rows, cols,
+    ));
+    Some(lines)
+}
+
+#[derive(Debug, Clone)]
+struct Toolchain {
+    latex: PathBuf,
+    dvipng: PathBuf,
+    pdflatex: PathBuf,
+    pdftocairo: PathBuf,
+}
+
+const TOOLCHAIN_MISSING_ERROR: &str =
+    "no TeX toolchain found (need latex + dvipng, or pdflatex + pdftocairo)";
+
+#[cfg(test)]
+thread_local! {
+    static TOOLCHAIN_MISSING_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_toolchain_missing_override<T>(missing: bool, f: impl FnOnce() -> T) -> T {
+    TOOLCHAIN_MISSING_OVERRIDE.with(|cell| {
+        let previous = cell.replace(Some(missing));
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+fn executable_on_path(command: &Path) -> bool {
+    if command.components().count() > 1 {
+        return command.is_file();
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file() || (cfg!(windows) && candidate.with_extension("exe").is_file())
+    })
+}
+
+/// True when image-mode LaTeX can never succeed because neither the DVI nor
+/// the PDF toolchain is installed. Cached for the process lifetime: this runs
+/// on the draw path and `PATH` probing is not free.
+pub(super) fn toolchain_missing() -> bool {
+    #[cfg(test)]
+    if let Some(missing) = TOOLCHAIN_MISSING_OVERRIDE.with(std::cell::Cell::get) {
+        return missing;
+    }
+    static MISSING: OnceLock<bool> = OnceLock::new();
+    *MISSING.get_or_init(|| {
+        let toolchain = Toolchain::from_environment();
+        let dvi = executable_on_path(&toolchain.latex) && executable_on_path(&toolchain.dvipng);
+        let pdf =
+            executable_on_path(&toolchain.pdflatex) && executable_on_path(&toolchain.pdftocairo);
+        !dvi && !pdf
+    })
+}
+
+impl Toolchain {
+    fn from_environment() -> Self {
+        Self {
+            latex: std::env::var_os("JCODE_LATEX_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("latex")),
+            dvipng: std::env::var_os("JCODE_DVIPNG_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("dvipng")),
+            pdflatex: std::env::var_os("JCODE_PDFLATEX_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("pdflatex")),
+            pdftocairo: std::env::var_os("JCODE_PDFTOCAIRO_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("pdftocairo")),
+        }
+    }
+}
+
+pub(super) fn render_latex_image(
+    source: &str,
+    display: bool,
+    max_width: Option<usize>,
+) -> LatexImageOutcome {
+    #[cfg(test)]
+    TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+    if !super::mermaid::image_protocol_available() {
+        return LatexImageOutcome::Failed("terminal image protocol unavailable".to_string());
+    }
+    let dpi = render_dpi(super::mermaid::get_font_size());
+    let failure_key = cache_key(source, display, dpi);
+    // Never re-run the toolchain for a snippet that already failed at this
+    // geometry (see #563).
+    if let Some(error) = cached_render_failure(failure_key) {
+        return LatexImageOutcome::Failed(error);
+    }
+    // The TeX toolchain can block for seconds (missing formats, timeouts), and
+    // this runs on the synchronous draw path, which also serves keyboard input
+    // and interrupt handling. Only consume an already-cached artifact here;
+    // anything else is queued onto the background worker (see #735).
+    let artifact = match cached_artifact(source, display, dpi) {
+        Ok(artifact) => artifact,
+        Err(_) => {
+            // Previously cached artifacts stay usable, but never queue work
+            // that cannot succeed without a TeX toolchain.
+            if toolchain_missing() {
+                return LatexImageOutcome::Failed(TOOLCHAIN_MISSING_ERROR.to_string());
+            }
+            if enqueue_render(source, display, dpi, failure_key) {
+                return LatexImageOutcome::Pending;
+            }
+            return LatexImageOutcome::Failed("LaTeX render worker unavailable".to_string());
+        }
+    };
+    let hash =
+        super::mermaid::register_external_image(&artifact.path, artifact.width, artifact.height);
+    register_copy_source(hash, source, display);
+    let mut lines = super::mermaid::result_to_lines(
+        super::mermaid::RenderResult::Image {
+            hash,
+            path: artifact.path,
+            width: artifact.width,
+            height: artifact.height,
+        },
+        max_width,
+    );
+    // Keep a real text row above the image. It gives copy badges a stable host
+    // instead of placing them on the invisible marker row that the viewport
+    // deliberately clears before drawing terminal graphics.
+    lines.insert(
+        0,
+        Line::from(Span::styled(
+            "  math",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    );
+    LatexImageOutcome::Ready(lines)
+}
+
+/// Load an already-rendered artifact from the on-disk cache without invoking
+/// any external command.
+fn cached_artifact(source: &str, display: bool, dpi: u16) -> Result<Artifact, String> {
+    validate_source(source)?;
+    let dir = cache_dir()?;
+    let cache_path = dir.join(format!("{:016x}.png", cache_key(source, display, dpi)));
+    load_artifact(&cache_path)
+}
+
+fn register_copy_source(hash: u64, source: &str, display: bool) {
+    let Ok(mut cache) = COPY_SOURCES.lock() else {
+        return;
+    };
+    if cache.entries.contains_key(&hash) {
+        cache.order.retain(|entry| *entry != hash);
+    }
+    cache.entries.insert(
+        hash,
+        LatexCopySource {
+            source: source.trim().to_string(),
+            display,
+        },
+    );
+    cache.order.push_back(hash);
+    while cache.order.len() > COPY_SOURCE_CACHE_LIMIT {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
+    }
+}
+
+pub(super) fn copy_source_for_placeholder(line: &Line<'_>) -> Option<LatexCopySource> {
+    let hash = super::mermaid::parse_inline_image_placeholder(line)
+        .map(|(hash, _, _)| hash)
+        .or_else(|| super::mermaid::parse_image_placeholder(line))?;
+    COPY_SOURCES
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&hash).cloned())
+}
+
+pub(super) fn copy_text(source: &LatexCopySource) -> String {
+    if source.display {
+        format!("$$\n{}\n$$", source.source)
+    } else {
+        format!("${}$", source.source)
+    }
+}
+
+#[derive(Debug)]
+struct Artifact {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+}
+
+fn render_dpi(font_size: Option<(u16, u16)>) -> u16 {
+    let Some((_, cell_height)) = font_size else {
+        return FALLBACK_RENDER_DPI;
+    };
+    // Computer Modern's visible ink is roughly 8/72 of the requested DPI for
+    // ordinary 10pt symbols. Nine DPI per terminal-row pixel therefore keeps
+    // simple math close to one full row of ink instead of letting it become
+    // smaller as users increase their terminal font size. Quantizing avoids
+    // producing redundant cache entries for tiny geometry differences.
+    let raw = cell_height
+        .max(1)
+        .saturating_mul(DPI_PER_CELL_PIXEL)
+        .clamp(MIN_RENDER_DPI, MAX_RENDER_DPI);
+    raw.saturating_add(DPI_QUANTUM / 2) / DPI_QUANTUM * DPI_QUANTUM
+}
+
+fn render_artifact(
+    source: &str,
+    display: bool,
+    dpi: u16,
+    toolchain: &Toolchain,
+) -> Result<Artifact, String> {
+    #[cfg(test)]
+    TEST_TOOLCHAIN_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    render_artifact_in(source, display, dpi, toolchain, &cache_dir()?)
+}
+
+fn render_artifact_in(
+    source: &str,
+    display: bool,
+    dpi: u16,
+    toolchain: &Toolchain,
+    cache_dir: &Path,
+) -> Result<Artifact, String> {
+    validate_source(source)?;
+    fs::create_dir_all(cache_dir).map_err(|e| format!("create LaTeX cache: {e}"))?;
+    let cache_path = cache_dir.join(format!("{:016x}.png", cache_key(source, display, dpi)));
+    if let Ok(artifact) = load_artifact(&cache_path) {
+        return Ok(artifact);
+    }
+
+    let work = tempfile::Builder::new()
+        .prefix("jcode-latex-")
+        .tempdir()
+        .map_err(|e| format!("create LaTeX workspace: {e}"))?;
+    let tex_path = work.path().join("formula.tex");
+    fs::write(&tex_path, latex_document(source, display))
+        .map_err(|e| format!("write LaTeX source: {e}"))?;
+
+    let dpi_arg = dpi.to_string();
+    let foreground_arg = dvipng_rgb_arg(FOREGROUND);
+    let dvi_result = run_command(
+        &toolchain.latex,
+        [
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "-no-shell-escape",
+            "formula.tex",
+        ],
+        work.path(),
+    )
+    .and_then(|_| {
+        run_command(
+            &toolchain.dvipng,
+            [
+                "-D",
+                dpi_arg.as_str(),
+                "-T",
+                "tight",
+                "-bg",
+                "Transparent",
+                "-fg",
+                foreground_arg.as_str(),
+                "-o",
+                "formula.png",
+                "formula.dvi",
+            ],
+            work.path(),
+        )
+    });
+    if let Err(dvi_error) = dvi_result {
+        render_with_pdf_toolchain(toolchain, work.path(), dpi).map_err(|pdf_error| {
+            format!("DVI renderer failed ({dvi_error}); PDF renderer failed ({pdf_error})")
+        })?;
+    }
+
+    let rendered = work.path().join("formula.png");
+    load_artifact(&rendered)?;
+    let temporary_cache_path = cache_path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::copy(&rendered, &temporary_cache_path).map_err(|e| format!("cache rendered LaTeX: {e}"))?;
+    if let Err(error) = fs::rename(&temporary_cache_path, &cache_path) {
+        if !cache_path.exists() {
+            let _ = fs::remove_file(&temporary_cache_path);
+            return Err(format!("publish rendered LaTeX: {error}"));
+        }
+        let _ = fs::remove_file(&temporary_cache_path);
+    }
+    load_artifact(&cache_path)
+}
+
+fn dvipng_rgb_arg((red, green, blue): (u8, u8, u8)) -> String {
+    // dvipng uses the dvips color syntax, whose RGB components are in 0..=1.
+    // Passing byte values such as `255 255 255` wraps to almost-black output.
+    format!(
+        "rgb {:.6} {:.6} {:.6}",
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0
+    )
+}
+
+fn render_with_pdf_toolchain(
+    toolchain: &Toolchain,
+    working_dir: &Path,
+    dpi: u16,
+) -> Result<(), String> {
+    run_command(
+        &toolchain.pdflatex,
+        [
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "-no-shell-escape",
+            "formula.tex",
+        ],
+        working_dir,
+    )?;
+    let dpi_arg = dpi.to_string();
+    run_command(
+        &toolchain.pdftocairo,
+        [
+            "-png",
+            "-singlefile",
+            "-r",
+            dpi_arg.as_str(),
+            "formula.pdf",
+            "formula",
+        ],
+        working_dir,
+    )?;
+    recolor_and_crop(&working_dir.join("formula.png"), dpi)
+}
+
+fn recolor_and_crop(path: &Path, dpi: u16) -> Result<(), String> {
+    let image = image::open(path)
+        .map_err(|e| format!("read PDF-rendered LaTeX PNG: {e}"))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let luminance =
+            (u16::from(pixel[0]) * 54 + u16::from(pixel[1]) * 183 + u16::from(pixel[2]) * 19) / 256;
+        if pixel[3] > 0 && luminance < 250 {
+            bounds = Some(match bounds {
+                Some((min_x, min_y, max_x, max_y)) => {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }
+                None => (x, y, x, y),
+            });
+        }
+    }
+    let (min_x, min_y, max_x, max_y) =
+        bounds.ok_or_else(|| "rendered formula is blank".to_string())?;
+    let padding = u32::from(dpi).saturating_mul(4).div_ceil(180).max(4);
+    let left = min_x.saturating_sub(padding);
+    let top = min_y.saturating_sub(padding);
+    let right = max_x.saturating_add(padding).min(width.saturating_sub(1));
+    let bottom = max_y.saturating_add(padding).min(height.saturating_sub(1));
+    let mut cropped = image::imageops::crop_imm(
+        &image,
+        left,
+        top,
+        right.saturating_sub(left).saturating_add(1),
+        bottom.saturating_sub(top).saturating_add(1),
+    )
+    .to_image();
+    for pixel in cropped.pixels_mut() {
+        let luminance =
+            (u16::from(pixel[0]) * 54 + u16::from(pixel[1]) * 183 + u16::from(pixel[2]) * 19) / 256;
+        let alpha = 255u16.saturating_sub(luminance) as u8;
+        *pixel = image::Rgba([FOREGROUND.0, FOREGROUND.1, FOREGROUND.2, alpha]);
+    }
+    cropped
+        .save(path)
+        .map_err(|e| format!("write cropped LaTeX PNG: {e}"))
+}
+
+fn cache_dir() -> Result<PathBuf, String> {
+    dirs::cache_dir()
+        .map(|path| path.join("jcode").join("latex"))
+        .ok_or_else(|| "no user cache directory is available".to_string())
+}
+
+fn load_artifact(path: &Path) -> Result<Artifact, String> {
+    let image = image::open(path).map_err(|e| format!("read rendered LaTeX PNG: {e}"))?;
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err("rendered LaTeX PNG is empty".to_string());
+    }
+    Ok(Artifact {
+        path: path.to_path_buf(),
+        width,
+        height,
+    })
+}
+
+fn run_command<const N: usize>(
+    executable: &Path,
+    args: [&str; N],
+    working_dir: &Path,
+) -> Result<(), String> {
+    let output_path = working_dir.join(".jcode-command-output.log");
+    let stdout = File::create(&output_path)
+        .map_err(|e| format!("create {} diagnostics: {e}", executable.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("capture {} diagnostics: {e}", executable.display()))?;
+    let mut child = Command::new(executable)
+        .args(args)
+        .current_dir(working_dir)
+        .env("openin_any", "p")
+        .env("openout_any", "p")
+        .env("TEXMFOUTPUT", working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|e| format!("start {}: {e}", executable.display()))?;
+    match child
+        .wait_timeout(COMMAND_TIMEOUT)
+        .map_err(|e| format!("wait for {}: {e}", executable.display()))?
+    {
+        Some(status) if status.success() => {
+            let _ = fs::remove_file(&output_path);
+            Ok(())
+        }
+        Some(status) => Err(format!(
+            "{} exited with {status}: {}",
+            executable.display(),
+            command_diagnostics(&output_path)
+        )),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!("{} timed out", executable.display()))
+        }
+    }
+}
+
+fn command_diagnostics(path: &Path) -> String {
+    const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+    let Ok(output) = fs::read(path) else {
+        return "no diagnostic output".to_string();
+    };
+    let start = output.len().saturating_sub(MAX_DIAGNOSTIC_BYTES);
+    String::from_utf8_lossy(&output[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn cache_key(source: &str, display: bool, dpi: u16) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    RENDERER_VERSION.hash(&mut hasher);
+    source.hash(&mut hasher);
+    display.hash(&mut hasher);
+    dpi.hash(&mut hasher);
+    FOREGROUND.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn latex_document(source: &str, display: bool) -> String {
+    let source = source.trim();
+    let math = if display {
+        format!("\\[\\displaystyle\n{source}\n\\]")
+    } else {
+        format!("${source}$")
+    };
+    format!(
+        "\\documentclass{{article}}\n\\pagestyle{{empty}}\n\\usepackage{{amsmath,amssymb}}\n\\begin{{document}}\n\\noindent {math}\n\\end{{document}}\n"
+    )
+}
+
+fn validate_source(source: &str) -> Result<(), String> {
+    if source.trim().is_empty() {
+        return Err("LaTeX source is empty".to_string());
+    }
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(format!("LaTeX source exceeds {MAX_SOURCE_BYTES} bytes"));
+    }
+    let lowered = source.to_ascii_lowercase();
+    const FORBIDDEN: &[&str] = &[
+        "\\input",
+        "\\include",
+        "\\openin",
+        "\\openout",
+        "\\read",
+        "\\write",
+        "\\immediate",
+        "\\usepackage",
+        "\\documentclass",
+        "\\special",
+        "\\catcode",
+    ];
+    if let Some(command) = FORBIDDEN.iter().find(|command| lowered.contains(**command)) {
+        return Err(format!("unsafe LaTeX command is not allowed: {command}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "markdown_latex_image_tests.rs"]
+mod tests;

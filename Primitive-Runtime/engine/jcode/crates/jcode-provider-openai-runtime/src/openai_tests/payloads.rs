@@ -1,0 +1,657 @@
+#[test]
+fn test_build_response_request_includes_stream_for_http() {
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(request["stream"], serde_json::json!(true));
+    assert_eq!(request["store"], serde_json::json!(false));
+}
+
+#[test]
+fn test_websocket_payload_strips_stream_and_background() {
+    let mut request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[serde_json::json!({"role": "user", "content": "hello"})],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(request["stream"], serde_json::json!(true));
+
+    request["background"] = serde_json::json!(true);
+
+    let obj = request.as_object_mut().expect("request is object");
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String("response.create".to_string()),
+    );
+    obj.remove("stream");
+    obj.remove("background");
+
+    assert!(
+        request.get("stream").is_none(),
+        "stream must be stripped for WebSocket payloads"
+    );
+    assert!(
+        request.get("background").is_none(),
+        "background must be stripped for WebSocket payloads"
+    );
+    assert_eq!(request["type"], serde_json::json!("response.create"));
+}
+
+#[test]
+fn test_websocket_payload_preserves_required_fields() {
+    let mut request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system prompt".to_string(),
+        &[serde_json::json!({"role": "user", "content": "hello"})],
+        &[serde_json::json!({"type": "function", "name": "bash"})],
+        false,
+        Some(16384),
+        Some("high"),
+        None,
+        None,
+        None,
+        None,
+    );
+
+    let obj = request.as_object_mut().expect("request is object");
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String("response.create".to_string()),
+    );
+    obj.remove("stream");
+    obj.remove("background");
+
+    assert_eq!(request["type"], "response.create");
+    assert_eq!(request["model"], "gpt-5.4");
+    assert_eq!(request["instructions"], "system prompt");
+    assert!(request["input"].is_array());
+    assert!(request["tools"].is_array());
+    assert_eq!(request["max_output_tokens"], serde_json::json!(16384));
+    assert_eq!(
+        request["reasoning"],
+        serde_json::json!({"effort": "high", "summary": "auto"})
+    );
+    assert_eq!(request["tool_choice"], "auto");
+}
+
+#[test]
+fn test_websocket_continuation_request_excludes_transport_fields() {
+    let base_request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[],
+        &[serde_json::json!({"type": "function", "name": "bash"})],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        Some("flex"),
+        Some("jcode-test-cache"),
+        Some("24h"),
+        Some(160_000),
+    );
+
+    let mut continuation = serde_json::json!({
+        "type": "response.create",
+        "previous_response_id": "resp_abc123",
+        "input": [{"role": "user", "content": "follow up"}],
+    });
+
+    if let Some(model) = base_request.get("model") {
+        continuation["model"] = model.clone();
+    }
+    if let Some(tools) = base_request.get("tools") {
+        continuation["tools"] = tools.clone();
+    }
+    if let Some(instructions) = base_request.get("instructions") {
+        continuation["instructions"] = instructions.clone();
+    }
+    if let Some(context_management) = base_request.get("context_management") {
+        continuation["context_management"] = context_management.clone();
+    }
+    if let Some(service_tier) = base_request.get("service_tier") {
+        continuation["service_tier"] = service_tier.clone();
+    }
+    if let Some(prompt_cache_key) = base_request.get("prompt_cache_key") {
+        continuation["prompt_cache_key"] = prompt_cache_key.clone();
+    }
+    if let Some(prompt_cache_retention) = base_request.get("prompt_cache_retention") {
+        continuation["prompt_cache_retention"] = prompt_cache_retention.clone();
+    }
+    continuation["store"] = serde_json::json!(false);
+    continuation["parallel_tool_calls"] = serde_json::json!(false);
+
+    assert!(
+        continuation.get("stream").is_none(),
+        "continuation request must not include stream"
+    );
+    assert!(
+        continuation.get("background").is_none(),
+        "continuation request must not include background"
+    );
+    assert_eq!(continuation["type"], "response.create");
+    assert_eq!(continuation["previous_response_id"], "resp_abc123");
+    assert_eq!(continuation["model"], "gpt-5.4");
+    assert_eq!(continuation["service_tier"], "flex");
+    assert_eq!(continuation["prompt_cache_key"], "jcode-test-cache");
+    assert_eq!(continuation["prompt_cache_retention"], "24h");
+    assert_eq!(
+        continuation["context_management"],
+        serde_json::json!([
+            {
+                "type": "compaction",
+                "compact_threshold": 160_000,
+            }
+        ])
+    );
+}
+
+#[test]
+fn test_websocket_continuation_delta_skips_reasoning_items() {
+    let input = vec![
+        serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "first" }]
+        }),
+        serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "ok" }]
+        }),
+        serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_duplicate_from_previous_response",
+            "summary": []
+        }),
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "done"
+        }),
+        serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "continue" }]
+        }),
+    ];
+
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, &[]);
+
+    assert_eq!(skipped_reasoning, 1);
+    assert_eq!(delta.len(), 2);
+    assert!(
+        delta
+            .iter()
+            .all(|item| item.get("type").and_then(|value| value.as_str()) != Some("reasoning")),
+        "previous_response_id deltas must not replay rs_* reasoning items"
+    );
+    assert_eq!(delta[0]["type"], "function_call_output");
+    assert_eq!(delta[1]["type"], "message");
+}
+
+#[test]
+fn websocket_delta_removes_only_matched_previous_response_output() {
+    let output = vec![
+        serde_json::json!({"type":"message", "id":"msg_1", "status":"completed", "role":"assistant", "phase":"commentary", "content":[{"type":"output_text", "text":"Working", "annotations":[]}]}),
+        serde_json::json!({"type":"function_call", "id":"fc_1", "status":"completed", "call_id":"call_1", "name":"read", "arguments":"{ \"path\": \"file\" }"}),
+    ];
+    let replay_text = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Working"}]});
+    let replay_call = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{\"path\":\"file\"}"});
+    let callback =
+        serde_json::json!({"type":"function_call_output", "call_id":"call_1", "output":"done"});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Client-injected history"}]});
+    let injected_call = serde_json::json!({"type":"function_call", "call_id":"client_call", "name":"read", "arguments":"{}"});
+    let user = serde_json::json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":"next"}]});
+    let input = vec![
+        user.clone(),
+        replay_text.clone(),
+        replay_call,
+        callback.clone(),
+        injected.clone(),
+        injected_call.clone(),
+        replay_text.clone(),
+        user.clone(),
+    ];
+    let (delta, skipped) = persistent_ws_incremental_items(&input, 1, &output);
+    assert_eq!(skipped, 2);
+    assert_eq!(
+        delta,
+        vec![callback, injected, injected_call, replay_text, user]
+    );
+    assert_eq!(input.len(), 8, "full canonical history must not be mutated");
+    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, &[]);
+    assert_eq!(without_output, input[1..]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
+    let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
+    let (delta, skipped) = persistent_ws_incremental_items(&[injected.clone()], 0, &[previous]);
+    assert_eq!(delta, vec![injected]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
+    for input in [
+        serde_json::json!("{ \"action\": \"spawn\" }"),
+        serde_json::json!({"action":"spawn"}),
+    ] {
+        let output = serde_json::json!({
+            "type":"custom_tool_call", "id":"ctc_1", "status":"completed",
+            "call_id":"call_1", "name":"swarm", "input":input,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"swarm",
+            "arguments":"{\"action\":\"spawn\"}",
+        });
+        let callback = serde_json::json!({
+            "type":"function_call_output", "call_id":"call_1", "output":"done",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay, callback.clone()], 0, &[output],
+        );
+        assert_eq!(delta, vec![callback]);
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_matches_normalized_empty_tool_arguments() {
+    for arguments in ["", " ", "null", " null "] {
+        let output = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":arguments,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":"{}",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(&[replay], 0, &[output]);
+        assert!(delta.is_empty());
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_preserves_modified_custom_tool_calls() {
+    let output = serde_json::json!({
+        "type":"custom_tool_call", "call_id":"call_1", "name":"read",
+        "input":"{\"path\":\"old\"}",
+    });
+    for (id, name, arguments) in [
+        ("call_2", "read", "{\"path\":\"old\"}"),
+        ("call_1", "write", "{\"path\":\"old\"}"),
+        ("call_1", "read", "{\"path\":\"new\"}"),
+    ] {
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay.clone()], 0, std::slice::from_ref(&output),
+        );
+        assert_eq!(delta, vec![replay]);
+        assert_eq!(skipped, 0);
+    }
+}
+
+#[test]
+fn websocket_output_bookkeeping_uses_completed_output_without_duplicates() {
+    let item = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{}"});
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":item}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{}}"#,
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[item.clone()]}})
+            .to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert_eq!(output, vec![item]);
+}
+
+#[test]
+fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
+    let call = serde_json::json!({
+        "type":"function_call", "id":"fc_1", "status":"completed",
+        "call_id":"call_1", "name":"swarm", "arguments":"{\"action\":\"spawn\"}",
+    });
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":call.clone()}).to_string(),
+        &mut output,
+    );
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    let callback = serde_json::json!({
+        "type":"function_call_output", "call_id":"call_1", "output":"spawned",
+    });
+    let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
+    assert_eq!(delta, vec![callback], "only the tool result is new to the provider");
+    assert_eq!(skipped, 1);
+}
+
+#[test]
+fn websocket_nonempty_terminal_output_remains_authoritative() {
+    let mut output = vec![serde_json::json!({"type":"message", "id":"old"})];
+    let final_item = serde_json::json!({"type":"message", "id":"final"});
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[final_item.clone()]}}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![final_item]);
+    output.clear();
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert!(output.is_empty(), "no output must not fabricate a prior response");
+}
+
+#[test]
+fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
+    let provider = OpenAIProvider::new_browser_only();
+    // The swarm sentinel is a valid stored effort...
+    assert_eq!(
+        OpenAIProvider::normalize_reasoning_effort("swarm").as_deref(),
+        Some("swarm")
+    );
+    // ...but maps to the strongest real effort when building the request.
+    assert_eq!(
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        OpenAIProvider::normalize_reasoning_effort("max").as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        OpenAIProvider::normalize_reasoning_effort("minimal").as_deref(),
+        Some("minimal")
+    );
+    assert_eq!(
+        provider.api_reasoning_effort(Some("max")).as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        provider.api_reasoning_effort(Some("high")).as_deref(),
+        Some("high")
+    );
+    assert_eq!(provider.api_reasoning_effort(None), None);
+
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("max"));
+    assert_eq!(request["reasoning"]["summary"], serde_json::json!("auto"));
+}
+
+/// GPT-5.6 Sol is jcode's default OpenAI model and defaults to `low`
+/// reasoning effort when the user has not configured one. The default must
+/// surface in `reasoning_effort()` (status/UI), resolve per-model (other
+/// models keep their API-side default), and land in the request payload.
+#[test]
+fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6-sol").as_deref(),
+        Some("low"),
+    );
+    // Long-context and cased variants resolve through canonicalization.
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("GPT-5.6-Sol").as_deref(),
+        Some("low"),
+    );
+    // Other models keep the model's own default (no forced effort).
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.5"),
+        None
+    );
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6"),
+        None,
+        "the clean 5.6 release is not the Sol quality profile"
+    );
+
+    // With no stored effort, the surfaced status reflects the Sol default.
+    let _guard = jcode_base::storage::lock_test_env();
+    jcode_base::auth::codex::set_active_account_override(Some("sol-low-default-test".to_string()));
+    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    provider.set_model("gpt-5.6-sol").unwrap();
+    *provider
+        .reasoning_effort
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    // An explicit user override still wins over the Sol default.
+    provider.set_reasoning_effort("high").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+    jcode_base::auth::codex::set_active_account_override(None);
+
+    // The default drives the request payload.
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.6-sol",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6-sol").as_deref(),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("low"));
+}
+
+/// Regression guard for issue #203: prompt overlays (`AGENTS.md`,
+/// `.jcode/prompt-overlay.md`) were silently dropped in ChatGPT/Codex OAuth
+/// mode because the provider replaced the caller's fully-built system prompt
+/// with a hardcoded ChatGPT instruction block. The composed system prompt must
+/// reach the Responses API verbatim in *both* ChatGPT-OAuth and API-key modes,
+/// otherwise user boot instructions are counted in prompt accounting but never
+/// actually sent.
+#[test]
+fn test_build_response_request_passes_system_prompt_through_verbatim() {
+    let system = "BASE PROMPT\n\n# Project Instructions (AGENTS.md)\nmarker-xyz";
+
+    for is_chatgpt_mode in [true, false] {
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.4",
+            system.to_string(),
+            &[],
+            &[],
+            is_chatgpt_mode,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            request["instructions"],
+            serde_json::json!(system),
+            "system prompt must not be rewritten (is_chatgpt_mode={is_chatgpt_mode})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
+    let provider = OpenAIProvider::new_browser_only();
+    *provider.model.write().await = "gpt-5.6".to_string();
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".to_string(),
+        vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+    );
+    for mode in ["swarm"] {
+        provider.set_reasoning_effort(mode).unwrap();
+        for (configured, expected) in [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("max", "xhigh"),
+            ("none", "low"),
+            ("minimal", "low"),
+        ] {
+            let effort =
+                provider.api_reasoning_effort_with_swarm_root(Some(mode), Some(configured));
+            assert_eq!(effort.as_deref(), Some(expected));
+            let request = OpenAIProvider::build_response_request(
+                "gpt-5.6",
+                "system".into(),
+                &[],
+                &[],
+                false,
+                Some(DEFAULT_MAX_OUTPUT_TOKENS),
+                effort.as_deref(),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(request["reasoning"]["effort"], expected);
+            assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+        }
+    }
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".to_string(),
+        vec!["none".into(), "low".into(), "max".into()],
+    );
+    for mode in ["swarm"] {
+        let effort = provider.api_reasoning_effort_with_swarm_root(Some(mode), Some("none"));
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.6",
+            "system".into(),
+            &[],
+            &[],
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            effort.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(request["reasoning"]["effort"], "none");
+    }
+    assert_eq!(
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("high"), Some("low"))
+            .as_deref(),
+        Some("high")
+    );
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("JCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("JCODE_SWARM_ROOT_EFFORT", "low")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let provider = OpenAIProvider::new_browser_only();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        *provider.model.write().await = "gpt-5.6".into();
+    });
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".into(),
+        vec!["none".into(), "low".into(), "max".into()],
+    );
+    for (mode, expected) in [("swarm", "low")] {
+        provider.set_reasoning_effort(mode).unwrap();
+        let effort = provider.api_reasoning_effort(provider.reasoning_effort().as_deref());
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.6",
+            "system".into(),
+            &[],
+            &[],
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            effort.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(request["reasoning"]["effort"], expected);
+        assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+    }
+}
