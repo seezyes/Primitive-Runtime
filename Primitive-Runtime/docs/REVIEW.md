@@ -68,6 +68,20 @@ embedding the reviewed commit changes the executable's version metadata.
 | Panel rendered the new engine inspection object as text                                             | The service view now displays native name/version and availability, active probes, maintenance errors and disconnection state.                                                                                                                                                |
 | Ordinary source import omitted a README required by the build script                                | The exact pinned upstream README is restored only in the modified tree; the frozen imported reference stays unchanged.                                                                                                                                                        |
 
+### Final clean-source installation correction
+
+Packaging from a fresh checkout exposed a declared Prettier development
+dependency missing from `package-lock.json`; `npm ci` correctly refused it.
+The lockfile now records the already-selected `prettier@3.6.2`. Independent
+review confirmed that the 17 added lines change only the root development
+dependency and its development-only package entry. Every existing package,
+including all runtime resolutions and integrity values, remains identical.
+
+A clean `npm ci --offline --ignore-scripts --no-audit --no-fund`, with no
+overriding shrinkwrap, passed with exit 0 and installed 99 packages. Production
+source and the native patch did not change after the complete acceptance run.
+The final package is rebuilt with the resulting exact source commit.
+
 ## Specification v0.2 acceptance matrix
 
 These observations apply to the tested Linux x64 configuration.
