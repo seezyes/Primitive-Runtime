@@ -1,0 +1,30 @@
+[package]
+name = "jcode-primitive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Restricted artifact-owned JCode sessions for Primitive Runtime"
+license = "MIT"
+publish = false
+
+# This deliberately small build graph does not compile or link JCode's daemon,
+# provider credentials, shell tools, swarm, self-update, or interactive TUI.
+[workspace]
+members = ["."]
+
+[dependencies]
+jcode-message-types = { path = "../crates/jcode-message-types" }
+jcode-session-types = { path = "../crates/jcode-session-types" }
+jcode-turn-core = { path = "../crates/jcode-turn-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "jcode-primitive"
+path = "src/main.rs"

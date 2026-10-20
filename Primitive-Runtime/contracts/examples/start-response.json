@@ -6,7 +6,8 @@
     "state": "queued",
     "phase": null,
     "verification": "not_run",
-    "application": "not_applicable"
+    "application": "not_applicable",
+    "terminal": false
   },
   "poll_after_ms": 1500
 }

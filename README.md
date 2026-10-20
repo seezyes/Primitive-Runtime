@@ -1,7 +1,13 @@
 # Primitive Runtime
 
-MCP-native multi-agent coding runtime powered by a modified JCode engine.
+Standalone MCP service for file-owned coding agents, with a restricted native
+JCode execution mode, durable runs, direct messages and isolated validation.
 
-Project source, contracts, specification and development instructions are in [Primitive-Runtime/](Primitive-Runtime/README.md).
+The implementation, installation instructions and operator panel are in
+[Primitive-Runtime/](Primitive-Runtime/README.md).
 
-> Status: R0 scaffolding only; not a working MCP runtime.
+Changes are produced in staging. A successful run returns the checked candidate
+and patch; it does not change the original workspace.
+
+See the [review and acceptance record](Primitive-Runtime/docs/REVIEW.md) for the
+tested scope and remaining platform and publication gates.

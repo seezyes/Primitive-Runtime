@@ -38,12 +38,7 @@
       ]
     },
     "verification": {
-      "enum": [
-        "not_run",
-        "passed",
-        "failed",
-        "unverified"
-      ]
+      "enum": ["not_run", "passed", "failed", "unverified"]
     },
     "application": {
       "enum": [

@@ -1,9 +1,6 @@
 export * from "./contracts.js";
-
-/**
- * The runtime is intentionally not started by importing this package.
- * R0 must implement restricted JCode execution before exposing any public MCP tool.
- */
-export function assertRuntimeAvailable(): never {
-  throw new Error("NOT_IMPLEMENTED: restricted JCode engine, durable controller and sandbox are required before serving MCP");
-}
+export * from "./types.js";
+export { RuntimeService, versions } from "./service.js";
+export { Configuration, createOperatorConfig } from "./control/config.js";
+export { serve, requestLocal, loadClientConfig } from "./control/ipc.js";
+export { RuntimeError } from "./errors.js";

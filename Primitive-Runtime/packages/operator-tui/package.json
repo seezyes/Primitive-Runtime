@@ -1,0 +1,9 @@
+{
+  "name": "@primitive-runtime/operator-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authenticated local operator panel for Primitive Runtime",
+  "exports": "./src/index.mjs",
+  "engines": { "node": ">=24" }
+}
