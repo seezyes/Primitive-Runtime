@@ -3,6 +3,12 @@
   "upstream_release": "v0.99.0",
   "upstream_commit": "774613c90751b6a26ae9eb6a27be6aff3f210062",
   "import_method": "verified release-tag source tree, vendored files",
-  "modifications": [],
-  "status": "upstream_source_with_four_redacted_oauth_literals"
+  "modifications": [
+    "Redacted GEMINI_CLIENT_ID embedded literal in crates/jcode-base/src/auth/gemini.rs",
+    "Redacted GEMINI_CLIENT_SECRET embedded literal in crates/jcode-base/src/auth/gemini.rs",
+    "Redacted ANTIGRAVITY_CLIENT_ID embedded literal in crates/jcode-base/src/auth/antigravity.rs",
+    "Redacted ANTIGRAVITY_CLIENT_SECRET embedded literal in crates/jcode-base/src/auth/antigravity.rs"
+  ],
+  "status": "upstream_source_with_four_redacted_oauth_literals",
+  "note": "Defaults were blanked because GitHub push protection rejected upstream embedded OAuth credentials; operator-supplied environment overrides must be used. Source is not byte-identical to upstream."
 }
