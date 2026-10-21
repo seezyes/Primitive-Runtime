@@ -4,6 +4,7 @@ import {
   writeFileSync,
   renameSync,
   mkdirSync,
+  existsSync,
   lstatSync,
   chmodSync,
   openSync,
@@ -13,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { RuntimeError, check } from "./errors.js";
+import { requirePrivateWindowsAcl, requireLocalWindowsPath } from "./platform/windows.js";
 export function hash(value: string | Uint8Array): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
 }
@@ -43,6 +45,8 @@ export function equalSecret(a: string, b: string): boolean {
   return timingSafeEqual(aa, bb);
 }
 export function privateDirectory(path: string): void {
+  if (process.platform === "win32") requireLocalWindowsPath(path);
+  const existed = existsSync(path);
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const st = lstatSync(path);
   check(
@@ -57,6 +61,8 @@ export function privateDirectory(path: string): void {
       "State directory is owned by a different user.",
     );
     chmodSync(path, 0o700);
+  } else {
+    requirePrivateWindowsAcl(path, !existed);
   }
 }
 export function atomicJSON(path: string, value: unknown): void {
@@ -100,7 +106,8 @@ export function readPrivateJSON(path: string): unknown {
     "CONFIG_REQUIRED",
     "Configuration must be a regular, unlinked file.",
   );
-  if (process.platform !== "win32")
+  if (process.platform === "win32") requirePrivateWindowsAcl(path);
+  else
     check(
       st.uid === process.getuid!() && (st.mode & 0o077) === 0,
       "ACCESS_DENIED",
@@ -130,7 +137,8 @@ export function readCredential(ref?: string): string | undefined {
       "CONFIG_REQUIRED",
       "Invalid credential file.",
     );
-    if (process.platform !== "win32")
+    if (process.platform === "win32") requirePrivateWindowsAcl(path);
+    else
       check(
         st.uid === process.getuid!() && (st.mode & 0o077) === 0,
         "ACCESS_DENIED",

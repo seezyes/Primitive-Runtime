@@ -521,7 +521,7 @@ export function createOperatorConfig(
   const token = randomBytes(32).toString("base64url");
   const socket =
     process.platform === "win32"
-      ? "\\\\.\\pipe\\primitive-runtime-" + hash(directory).slice(7, 23)
+      ? "\\\\.\\pipe\\primitive-runtime-" + randomBytes(24).toString("hex")
       : join(directory, "runtime.sock");
   const c: OperatorConfig = {
     config_version: 1,

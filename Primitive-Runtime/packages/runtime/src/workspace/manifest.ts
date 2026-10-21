@@ -129,7 +129,11 @@ export async function removeTree(root: string): Promise<void> {
     for (const item of await fs.readdir(root, { withFileTypes: true })) {
       if (item.isDirectory() && !item.isSymbolicLink())
         await removeTree(path.join(root, item.name));
-      else await fs.unlink(path.join(root, item.name));
+      else {
+        const child = path.join(root, item.name);
+        if (process.platform === "win32") await fs.chmod(child, 0o600);
+        await fs.unlink(child);
+      }
     }
     await fs.rmdir(root);
   } catch (error) {
