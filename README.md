@@ -1,7 +1,7 @@
 # Primitive Runtime
 
-MCP-native multi-agent coding runtime powered by a modified JCode engine.
+Open-source MCP runtime for Windows 10/11. This public repository contains distributable source code and packaging files.
 
-Project source, contracts, specification and development instructions are in [Primitive-Runtime/](Primitive-Runtime/README.md).
+Development specifications, internal review, evaluations and debugging materials are not published here. Contributions and releases are subject to project review.
 
-> Status: R0 scaffolding only; not a working MCP runtime.
+> The default branch currently contains initial scaffolding; unreleased implementation is not a supported release.
