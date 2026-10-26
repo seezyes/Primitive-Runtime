@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { RuntimeError, check } from "./errors.js";
-import { requirePrivateWindowsAcl, requireLocalWindowsPath } from "./platform/windows.js";
+import { requirePrivateWindowsAcl, requireLocalWindowsPath } from "./platform/windows/acl.js";
 export function hash(value: string | Uint8Array): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
 }
@@ -46,7 +46,6 @@ export function equalSecret(a: string, b: string): boolean {
 }
 export function privateDirectory(path: string): void {
   if (process.platform === "win32") requireLocalWindowsPath(path);
-  const existed = existsSync(path);
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const st = lstatSync(path);
   check(
@@ -62,7 +61,7 @@ export function privateDirectory(path: string): void {
     );
     chmodSync(path, 0o700);
   } else {
-    requirePrivateWindowsAcl(path, !existed);
+    requirePrivateWindowsAcl(path, true);
   }
 }
 export function atomicJSON(path: string, value: unknown): void {
