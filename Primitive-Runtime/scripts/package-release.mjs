@@ -252,11 +252,8 @@ export function packageRelease(environment = process.env) {
         size: bytes.length,
       },
     ];
-    for (const file of supplied?.files ?? []) {
-      writeFileSync(join(output, file.name), file.bytes, { flag: "wx" });
-      const { bytes: _bytes, ...entry } = file;
-      files.push(entry);
-    }
+    // Evidence bytes remain in the private review store: only the signed
+    // hash commitments and product artifact may leave the repository.
     if (signed) {
       const after = sourceState(root);
       assertReleaseReady(after, native, supplied.evidence);
@@ -276,7 +273,16 @@ export function packageRelease(environment = process.env) {
         source_revision: build.source_revision,
         engine: native,
         files,
-        acceptance: supplied?.evidence ?? null,
+        ...(signed ? { evidence_visibility: "private-attested" } : {}),
+        acceptance: signed
+          ? {
+              ...supplied.evidence,
+              review: {
+                ...supplied.evidence.review,
+                reviewer: "private-reviewer",
+              },
+            }
+          : null,
         trust,
       },
       signed,
