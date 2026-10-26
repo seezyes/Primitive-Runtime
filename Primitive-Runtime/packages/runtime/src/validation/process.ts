@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { RuntimeError } from "../errors.js";
@@ -75,14 +75,38 @@ export async function runBounded(
     const stop = () => {
       if (stopped) return;
       stopped = true;
-      if (options.onStop) cleanup = options.onStop();
-      try {
-        if (process.platform !== "win32" && child.pid)
-          process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH")
-          spawnError = "Could not terminate the validation process group.";
+      // Windows does not implement negative-PID process groups. taskkill /T
+      // traverses the descendant tree; the acknowledged result is part of the
+      // cleanup fence. This is a best-effort fallback, NOT a Job Object and
+      // does not cover a parent crash or escaped descendants.
+      if (process.platform === "win32" && child.pid) {
+        const root = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+        cleanup = new Promise<void>((resolveCleanup, rejectCleanup) => {
+          if (!root) {
+            reject(new RuntimeError("CLEANUP_FAILED", "Windows SystemRoot is unavailable."));
+            return;
+          }
+          execFile(path.join(root, "System32", "taskkill.exe"),
+            ["/PID", String(child.pid), "/T", "/F"],
+            { windowsHide: true, timeout: 12000 },
+            (error) => {
+              if (error && child.exitCode === null && child.signalCode === null)
+                rejectCleanup(new RuntimeError("CLEANUP_FAILED",
+                  "Windows process-tree termination was not acknowledged."));
+              else resolveCleanup();
+            });
+        });
+        if (options.onStop) cleanup = Promise.all([cleanup, options.onStop()]).then(() => {});
+      } else {
+        if (options.onStop) cleanup = options.onStop();
+        try {
+          if (process.platform !== "win32" && child.pid)
+            process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+            spawnError = "Could not terminate the validation process group.";
+        }
       }
     };
     const timer = setTimeout(() => {
