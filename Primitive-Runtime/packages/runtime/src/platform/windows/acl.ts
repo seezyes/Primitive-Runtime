@@ -33,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $p = $env:PRIMITIVE_ACL_PATH
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 
 # Reject junctions and other reparse points in the entire ancestry, not just
 # the final leaf. Never modify the DACL of an unexpected redirection target.
@@ -65,7 +65,7 @@ if ($env:PRIMITIVE_ACL_REPAIR -eq '1') {
            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
   $allow = [System.Security.AccessControl.AccessControlType]::Allow
   foreach ($sid in @($me, $system)) {
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
       $sid,
       [System.Security.AccessControl.FileSystemRights]::FullControl,
       $flags,
