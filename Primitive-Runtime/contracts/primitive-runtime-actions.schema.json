@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/seezyes/Primitive-Runtime/blob/main/Primitive-Runtime/contracts/primitive-runtime-actions.schema.json",
+  "title": "Primitive Runtime MCP tool input v0.1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/capabilities"
+    },
+    {
+      "$ref": "#/$defs/start"
+    },
+    {
+      "$ref": "#/$defs/status"
+    },
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/artifact"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_revisions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "max_wall_time_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "const": "capabilities"
+        }
+      }
+    },
+    "start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "client_request_id", "workspace_id", "task"],
+      "properties": {
+        "action": {
+          "const": "start"
+        },
+        "client_request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/id"
+        },
+        "task": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40000
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        },
+        "model_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "validation_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "mode": {
+          "const": "stage"
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "run_id"],
+      "properties": {
+        "action": {
+          "const": "status"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "after_event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "run_id"],
+      "properties": {
+        "action": {
+          "const": "result"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "run_id", "artifact_id"],
+      "properties": {
+        "action": {
+          "const": "artifact"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "run_id"],
+      "properties": {
+        "action": {
+          "const": "cancel"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

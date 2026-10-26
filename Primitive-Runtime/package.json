@@ -1,0 +1,42 @@
+{
+  "name": "primitive-runtime",
+  "version": "0.1.0",
+  "description": "Standalone MCP runtime for artifact-owned coding agents with a restricted JCode engine",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/runtime/src/cli.js",
+    "package:release": "node scripts/package-release.mjs"
+  },
+  "bin": {
+    "primitive-runtime": "dist/runtime/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "packages/operator-tui",
+    "contracts",
+    "prompts",
+    "config",
+    "scripts",
+    "bin",
+    "build-info.json",
+    "licenses",
+    "npm-shrinkwrap.json",
+    "engine/JCODE_PROVENANCE.json"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ajv": "8.17.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  },
+  "license": "Apache-2.0"
+}

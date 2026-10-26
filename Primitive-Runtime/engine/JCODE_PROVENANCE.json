@@ -1,0 +1,49 @@
+{
+  "upstream_repository": "https://github.com/1jehuang/jcode",
+  "upstream_release": "v0.99.0",
+  "upstream_commit": "774613c90751b6a26ae9eb6a27be6aff3f210062",
+  "import_method": "verified release-tag source tree, vendored files",
+  "modifications": [
+    "Redacted GEMINI_CLIENT_ID embedded literal in crates/jcode-base/src/auth/gemini.rs",
+    "Redacted GEMINI_CLIENT_SECRET embedded literal in crates/jcode-base/src/auth/gemini.rs",
+    "Redacted ANTIGRAVITY_CLIENT_ID embedded literal in crates/jcode-base/src/auth/antigravity.rs",
+    "Redacted ANTIGRAVITY_CLIENT_SECRET embedded literal in crates/jcode-base/src/auth/antigravity.rs",
+    "Extracted a deterministic jcode-turn-core crate from the ordinary headless Agent::run_turn history, request, assistant assembly, ordered tool-result, continuation and cancellation operations; integrated the same core into ordinary run_once/run_once_capture and the restricted primitive adapter",
+    "Added isolated primitive/ native workspace linking jcode-turn-core and pinned JCode message/session leaf crates; enforced role-bound headless sessions, native-owned provider history, pending completion correlation, tool policy, owned-artifact hash/version fencing, bounded snapshots, cancellation and fail-closed restoration",
+    "Pinned the ordinary modified workspace Cargo.lock and its jcode-turn-core dependency; kept the restricted binary's independent lockfile and excluded ordinary provider/tool/daemon/TUI dependencies from its build graph",
+    "Restored modified/README.md from pinned upstream commit 774613c90751b6a26ae9eb6a27be6aff3f210062 because the initial vendor import omitted it but the ordinary app-core build script embeds it; the upstream reference tree was not changed"
+  ],
+  "status": "restricted_headless_engine_implemented",
+  "note": "Defaults were blanked because GitHub push protection rejected upstream embedded OAuth credentials; operator-supplied environment overrides must be used. Source is not byte-identical to upstream.",
+  "native_engine": {
+    "source_path": "engine/jcode/modified/primitive",
+    "binary": "jcode-primitive",
+    "version": "0.1.0",
+    "protocol": "primitive-engine/1",
+    "turn_core_protocol": "jcode-turn/1",
+    "shared_ordinary_turn_core": true,
+    "policy_revision": "primitive-policy/1",
+    "upstream_leaf_crates": {
+      "jcode-message-types": "0.1.0",
+      "jcode-session-types": "0.1.0"
+    },
+    "sdk_version": null,
+    "sdk_note": "The shared ordinary native turn core and JCode message/session types are reused. The TypeScript SDK and standard daemon are not linked; TypeScript is the injected provider HTTP and durable-effects adapter.",
+    "shared_core": {
+      "path": "engine/jcode/modified/crates/jcode-turn-core",
+      "ordinary_consumer": "engine/jcode/modified/crates/jcode-app-core/src/agent/turn_loops.rs: Agent::run_turn",
+      "ordinary_entrypoints": ["Agent::run_once", "Agent::run_once_capture_with_display_role"],
+      "primitive_consumer": "engine/jcode/modified/primitive/src/conversation.rs",
+      "upstream_source_mapping": [
+        "crates/jcode-base/src/session.rs: Session message persistence and provider history structures",
+        "crates/jcode-app-core/src/agent/turn_loops.rs: run_turn provider request, assistant block assembly, ordered registry dispatch, correlated result append, continuation and cancellation"
+      ],
+      "scope": "Ordinary headless run_turn and restricted assignments share the execution state machine. The separate upstream streaming UI loop remains unchanged; memory, compaction, hooks, credentials, and registry effects stay in the ordinary outer adapter.",
+      "behavioral_tests": "engine/jcode/modified/primitive/tests/turn_core.rs",
+      "ordinary_lockfile": "engine/jcode/modified/Cargo.lock"
+    },
+    "source_revision": "Supplied by PRIMITIVE_ENGINE_SOURCE_REVISION when building a reviewed release; unreleased builds report unreleased-source.",
+    "lockfile": "engine/jcode/modified/primitive/Cargo.lock",
+    "patch": "engine/jcode/patches/jcode-modifications.patch"
+  }
+}
