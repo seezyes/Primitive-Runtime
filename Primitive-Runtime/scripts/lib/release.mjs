@@ -398,7 +398,7 @@ export function validateManifest(value, signedOnly = true) {
     "files",
     "acceptance",
     "trust",
-  ]);
+  ], ["evidence_visibility"]);
   requireValue(
     value.manifest_version === 1 &&
       VERSION.test(value.runtime_version) &&
@@ -487,23 +487,39 @@ export function validateManifest(value, signedOnly = true) {
       },
       false,
     );
-    for (const item of [...value.acceptance.gates, value.acceptance.review]) {
-      const file = files.get(item.report_file.toLowerCase());
+    // Report contents are validated against their hashes before signing, but
+    // private review artifacts are NOT distributed with the product. The
+    // signed manifest is a publisher attestation of those commitments.
+    const visibility = value.evidence_visibility ?? "bundled";
+    requireValue(
+      visibility === "bundled" || visibility === "private-attested",
+      "Unknown acceptance evidence visibility.",
+    );
+    if (visibility === "private-attested") {
       requireValue(
-        file &&
-          file.sha256 === item.report_sha256 &&
-          file.role ===
-            (item === value.acceptance.review
-              ? "review-report"
-              : "acceptance-report"),
-        "An acceptance report is not bound to a release artifact.",
+        value.files.every((file) => file.role === "package"),
+        "Private acceptance and review reports must not be distributed.",
       );
+    } else {
+      for (const item of [...value.acceptance.gates, value.acceptance.review]) {
+        const file = files.get(item.report_file.toLowerCase());
+        requireValue(
+          file &&
+            file.sha256 === item.report_sha256 &&
+            file.role ===
+              (item === value.acceptance.review
+                ? "review-report"
+                : "acceptance-report"),
+          "An acceptance report is not bound to a release artifact.",
+        );
+      }
     }
   } else {
     requireValue(
       value.trust.release_eligible === false &&
         value.acceptance === null &&
-        !own(value.trust, "publisher_key_id"),
+        !own(value.trust, "publisher_key_id") &&
+        !own(value, "evidence_visibility"),
       "Development packages must remain unsigned and ineligible for release.",
     );
     text(value.source_revision, "development source revision", 80);
