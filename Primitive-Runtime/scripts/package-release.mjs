@@ -141,7 +141,8 @@ export function packageRelease(environment = process.env) {
     source_revision: source.source_revision,
     engine: native,
     trust,
-    acceptance: supplied?.evidence ?? null,
+    // Internal acceptance evidence is not runtime build metadata. It remains
+    // private and is summarized only as a signed manifest attestation.
   };
 
   // Emit this before npm pack so the installed CLI reports the same provenance.
